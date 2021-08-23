@@ -627,13 +627,18 @@ def return_traditional_interval_data(raw_precip: pd.DataFrame) -> pd.DataFrame:
        distribution that represents the variability (uncertainty) of precipitation based on the 90-percent confidence 
        interval retrieved from the NOAA data.
     """
+    CL = 0.68
     df2 = raw_precip
     df2['Log SD (Lower)'] = (np.log(df2['Median'].values) - np.log(df2['Lower (90%)'].values))/1.645
     df2['Log SD (Upper)'] = (np.log(df2['Upper (90%)'].values) - np.log(df2['Median'].values))/1.645
     df2['Max Log SD'] = np.maximum(df2['Log SD (Lower)'].values, df2['Log SD (Upper)'].values)
-    SD = df2['Max Log SD'].values
-    df2['Lower (68%)'] = np.exp(-df2['Max Log SD'].values)*df2['Median'].values
-    df2['Upper (68%)'] = np.exp(df2['Max Log SD'].values)*df2['Median'].values
+#     SD = df2['Max Log SD'].values
+#     mu_LN = np.log(df2['Median'].values)
+    
+    df2['Lower (68%)'] = stats.lognorm.ppf(0.5-CL/2, df2['Max Log SD'], scale = df2['Median'])
+    df2['Upper (68%)'] = stats.lognorm.ppf(0.5+CL/2, df2['Max Log SD'], scale = df2['Median'])
+#     df2['Lower (68%)'] = np.exp(-df2['Max Log SD'].values)*df2['Median'].values
+#     df2['Upper (68%)'] = np.exp(df2['Max Log SD'].values)*df2['Median'].values
     return df2[['Median','Lower (68%)','Upper (68%)']]
 
 # def mu_truncated_LN(sigma: float, PMP: float, median: float, Initial_Value: float) -> float:
