@@ -2,7 +2,7 @@ import unittest
 import sys
 import pandas as pd
 sys.path.append('../core')
-from core import hydromet 
+from src import hydromet 
 print("heloo")
 
 class TestHydroMet(unittest.TestCase):
