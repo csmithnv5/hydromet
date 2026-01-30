@@ -18,9 +18,11 @@ import re
 from shapely.geometry import mapping
 import rasterio
 from rasterio.mask import mask
+from .hydromet_JSON_to_DSS import *
 
 geoDF = 'GeoDataFrame'
 plib = 'pathlib.Path'
+
 AEC_METERS = ("+proj=aea +lat_1=29.5 +lat_2=45.5 +lat_0=37.5 +lon_0=-96 "
               "+x_0=0 +y_0=0 +ellps=GRS80 +datum=NAD83 +units=m +no_defs")
 
@@ -472,3 +474,417 @@ def nrcs_nesting_eqn(t:int,cumulative_ratio:pd.DataFrame,dur_precip_df_noaa:pd.D
 
     return crr
 
+def get_volume_region(precip_table_dir: str, vol_col: str='Volume', 
+                    reg_col: str='Region', display_print: bool=True) -> list:
+    '''Extracts the NOAA Atlas 14 volume and region from the Excel file 
+       created by PrecipTable.ipynb
+    '''
+    df = pd.read_excel(precip_table_dir, sheet_name = 'NOAA_Atlas_MetaData')
+    vol =df[vol_col][0]
+    reg = df[reg_col][0]
+    results = [vol, reg]
+    if display_print: print('NOAA Atlas 14: Volume {}, Region {}'.format(vol, reg))
+    return results
+
+
+def get_temporal_map(data_dir: str, filename: str, vol: int, reg: int, 
+                                dur: int, display_print: bool=True) -> dict:
+    '''Reads the json file containing the temporal distribution data metadata
+       and returns the data map and number of rows to skip for the specified
+       volume, region, and duration. 
+    '''
+    with open(data_dir/filename) as json_file:  
+        all_map = json.load(json_file)
+    sliced_map = all_map[str(vol)]['regions'][str(reg)]['durations'][str(dur)]
+    if display_print: print(sliced_map)
+    return sliced_map
+
+
+def get_temporals(temporal_dir: str, vol: int, reg: int, dur: int, 
+                    qmap: dict, display_print: bool=True) -> pd.DataFrame:
+    '''Reads the csv file containing the temporal distributions for the
+       specified volume, region, and duration. Rows with NaNs for an index 
+       are dropped. Data was downloaded from:
+       https://hdsc.nws.noaa.gov/hdsc/pfds/pfds_temporal.html
+    '''
+    f = 'Temporals_Volume{0}_Region{1}_Duration{2}.csv'.format(vol, reg, dur)
+    path = temporal_dir/f
+    s = qmap['skiprows']
+    df = pd.read_csv(path, skiprows = s, index_col = 0, keep_default_na=False)
+    df = df[df.index!=''].copy()
+    for col in df.columns:
+        if 'Unnamed' in col:
+            del df[col]
+    if display_print: print(display(df.head(2)))
+    return df
+
+
+def get_quartile_rank(data_dir: str, filename: str, vol: int, reg: int, 
+                                dur: int, display_print: bool=True) -> list:
+    '''Extracts the quartile ranks for the specified volume, region, and
+       duration. The quartile rank corresponds to the percentage of 
+       precipitation events whose temporal distributions are represented
+       by those in a specific quartile.
+    '''
+    input_data = data_dir/filename
+    sheet = 'NOAA Atlas 14 Vol {0}'.format(vol)
+    df = pd.read_excel(input_data, sheet_name=sheet, index_col=0)
+    rank=list(df[(df.index==dur)  & (df['Region']==reg)].values[0])[1:5]
+    rank_per = []
+    for i in rank: 
+        rank_per.append(i/100.0)
+    total = sum(rank_per)
+    assert 0.99 <= total <= 1.01, 'Sum of ranks not between 99% and 101%' 
+    if display_print: print(rank_per)
+    return rank_per
+
+
+def get_duration_weight(data_dir: str, filename: str, vol: int, reg: int, 
+                                dur: int, display_print: bool=True) -> list:
+    '''Extracts the duration weight for the specified volume, region, and
+       duration. The duration weight corresponds to the percentage of 
+       precipitation events with the specified duration.
+    '''
+    input_data = data_dir/filename
+    sheet = 'NOAA Atlas 14 Vol {0}'.format(vol)
+    df = pd.read_excel(input_data, sheet_name = sheet, index_col=0)
+    w=df[(df.index==dur)  & (df['Region']==reg)]['Duration Weight'].values[0]  
+    if display_print: print(w)
+    return w
+
+def get_quartiles(raw_temporals: pd.DataFrame, dur: int, qrank: list, 
+                    qmap: dict, vol: int, reg: int, plot: bool=False) -> dict:
+    '''For each quantile, extract the temporal data from the raw_temporals 
+       dataframe, convert the data to numeric, store the data in a dictionary, 
+       and plot the deciles.
+    '''
+    idx_name = raw_temporals.index.name
+    assert idx_name in ['percent of duration', 'hours'], "Check temporal data"
+    curve_group = {}
+    for key in qmap['map'].keys():            
+        q = raw_temporals[qmap['map'][str(key)][0]:qmap['map'][str(key)][1]].copy()
+        if idx_name == 'percent of duration':
+            q.index.name = None
+            q = q.T
+            tstep = dur/(q.shape[0]-1)
+            q['hours'] = np.arange(0, dur+tstep, tstep)
+        elif idx_name == 'hours':
+            q = q.reset_index()
+            q['hours'] = pd.to_numeric(q['hours'])
+        q = q.set_index('hours')  
+        for col in q.columns:
+            q[col] = pd.to_numeric(q[col])
+        curve_group[key] = q                
+    if plot: plot_deciles_by_quartile(curve_group, qrank, qmap, vol, reg, dur)
+    return curve_group
+
+
+def map_quartiles_deciles(n_samples: int=75, seed: int=None, 
+                plot: bool=False, display_print: bool=True) -> pd.DataFrame:
+    '''Constructs a dataframe containing randomly selected deciles for the 
+       specified number of samples (events).
+    '''
+    if not seed:
+        seed = np.random.randint(low=0, high=10000)
+    np.random.seed(seed)
+    df = pd.DataFrame(index=np.arange(1, n_samples+1))
+    df['Deciles'] = np.random.randint(1, 10, n_samples)*10
+    if plot: plot_decile_histogram(df)
+    if display_print: print('Seed - Deciles:', seed)
+    return df
+
+
+def plot_deciles_by_quartile(curve_group: dict, qrank: list,
+                qmap: dict, vol: int, reg: int, dur: int) -> plt.subplots:
+    '''Plots the temporal distribution at each decile for each quartile. 
+    '''
+    fig, ax = plt.subplots(2,2, figsize=(24,10))
+    for axi in ax.flat:
+        axi.xaxis.set_major_locator(plt.MultipleLocator((
+                                            curve_group['q1'].shape[0]-1)/6))
+        axi.xaxis.set_minor_locator(plt.MultipleLocator(1))
+    axis_num=[[0,0], [0,1], [1,0], [1,1]]
+    for i, val in enumerate(qmap['map'].keys()):
+        for col in curve_group[val].columns:
+            plt.suptitle('Volume '+str(vol)+' Region '+str(reg)+' Duration '+\
+                                str(dur), fontsize = 20, x  = 0.507, y = 1.02)
+            ax[axis_num[i][0],axis_num[i][1]].plot(curve_group[val][col], 
+                                                                label=col) 
+            ax[axis_num[i][0],axis_num[i][1]].grid()
+            ax[axis_num[i][0],axis_num[i][1]].set_title('Quartile {0}\n{1}%'
+                    ' of Cases'.format(i+1, int(qrank[i]*100)), fontsize=16)
+            ax[axis_num[i][0],axis_num[i][1]].legend(title='Deciles')
+            ax[axis_num[i][0],axis_num[i][1]].set_xlabel('Time (hours)', 
+                                                                fontsize=14)
+            ax[axis_num[i][0],axis_num[i][1]].set_ylabel('Precip (% Total)', 
+                                                                fontsize=14)
+    plt.tight_layout()
+
+
+def plot_decile_histogram(df: pd.DataFrame) -> plt.subplots:
+    '''Plots a histogram of the randomly selected decile numbers within the
+       passed dataframe.
+    '''
+    fig = df.hist(bins=20, figsize=(20,6), grid=False)
+
+##need to smooth this per NEH 
+def create_inflection_points_nrcs(dur_precip_df_noaa):
+    '''
+    Docstring for create_inflection_points_nrcs
+    
+    :param dur_precip_df_noaa: Description
+    '''
+    dur_precip_df_noaa['ratio'] = dur_precip_df_noaa['value']/dur_precip_df_noaa.loc['24h','value']
+    #convert duration to minutes
+    min_hr_dict = {'m': 1,'h':60}
+    dur_precip_df_noaa['duration_minutes'] = dur_precip_df_noaa.apply(lambda x: int(x.name[:2])*min_hr_dict[x.name[2:]],axis=1)
+
+    #get incremental intensity in/h
+    dur_precip_df_noaa['incre_int'] = dur_precip_df_noaa.apply(lambda x: x.value / (x.duration_minutes/60),axis=1)
+
+    #need to add regression here to smooth the 
+    #initial_df = dur_precip_df_noaa.copy()[['duration_minutes','incre_int']].set_index('duration_minutes')
+    revised_df = dur_precip_df_noaa #smoothed
+
+    #set points along curve from the NEH Handbook. (u)se strings to avoid float issues)
+    cumulative_ratio = {}
+    cumulative_ratio['0'] = 0
+    cumulative_ratio['6'] = 0.5 - (revised_df.loc['12h'].ratio/2)
+    cumulative_ratio['9'] = 0.5 - (revised_df.loc['06h'].ratio/2)
+    cumulative_ratio['10.5'] = 0.5 - (revised_df.loc['03h'].ratio/2)
+    cumulative_ratio['11'] = 0.5 - (revised_df.loc['02h'].ratio/2)
+    cumulative_ratio['11.5'] = 0.5 - (revised_df.loc['60m'].ratio/2)
+    cumulative_ratio['11.75'] = 0.5 - (revised_df.loc['30m'].ratio/2)
+    cumulative_ratio['11.875'] = 0.5 - (revised_df.loc['15m'].ratio/2)
+    cumulative_ratio['11.9167'] = 0.5 - (revised_df.loc['10m'].ratio/2)
+    return cumulative_ratio
+
+def get_input_data(precip_table_dir: str, duration: int, lower_limit: int=2,
+                                 display_print: bool=True) -> pd.DataFrame:
+    '''Extracts the precipitation frequency data for the specified duration
+       from an Excel sheet and returns the dataframe with the data.  
+    '''
+    area_precip = 'AreaDepths_{}hr'.format(duration)
+    df = pd.read_excel(precip_table_dir, sheet_name= area_precip, index_col=0)
+    df_truncated = df[df.index >= lower_limit]
+    if display_print: print(display(df_truncated.head(2)))
+    return df_truncated
+
+def precip_distributed_nrcs(hydro_events:np.ndarray,nrcs_precip_table_dir: pl.WindowsPath,
+                     precip_data: pd.DataFrame, display_print = False):
+    """Takes the events, precipitation data, nrcs temporal distribution, CN and applies the CN reduction method to
+    obtain a runoff curve for each recurrence interval
+    """
+    #runoff_distros1 = {}
+    prep_curves = pd.DataFrame(columns = hydro_events.astype(float))
+    for event in hydro_events:
+        dist_df = get_hyeto_input_data_nrcs(nrcs_precip_table_dir, event, display_print)
+        # dist_df['precip_cumu'] = dist_df['cu_precip_ratio']*precip_data['Median'].loc[event]
+        # dist_df['hyeto_input'] = dist_df['precip_cumu'].diff()
+        dist_df['hyeto_input'] = dist_df['precip'].fillna(0.0)
+        prep_curves[event] = dist_df['hyeto_input']
+        t_step = dist_df.index[1]
+    return prep_curves, t_step
+
+def precip_to_runoff_nrcs(hydro_events:np.ndarray,nrcs_precip_table_dir: pl.WindowsPath,
+                     precip_data: pd.DataFrame, CN: int, display_print = False):
+    """Takes the events, precipitation data, nrcs temporal distribution, CN and applies the CN reduction method to
+    obtain a runoff curve for each recurrence interval
+    """
+    #runoff_distros1 = {}
+    prep_curves = pd.DataFrame(columns = hydro_events.astype(float))
+    for event in hydro_events:
+        dist_df = get_hyeto_input_data_nrcs(nrcs_precip_table_dir, event, display_print)
+        s = S_24hr(CN)
+        ia = IA_24hr(s)
+        #runoff_distros1[event] = excess_precip(dist_df,ia, s)\
+        dist_df['precip_cumu'] = dist_df['cu_precip_ratio']*dist_df['precip'].sum()
+        dist_df = excess_precip(dist_df,ia, s)
+        prep_curves[event] = dist_df['hyeto_input']
+        t_step = dist_df.index[1]
+    return prep_curves, t_step
+
+def precip_to_runoff_atlas(hydro_events:np.ndarray,atlas14_precip_table_dir: pl.WindowsPath,
+                     precip_data: pd.DataFrame, CN: int, quartile:int, display_print = False):
+    """Takes the events, precipitation data, nrcs temporal distribution, CN and applies the CN reduction method to
+    obtain a runoff curve for each recurrence interval
+    """
+    #runoff_distros1 = {}
+    Atlas14_hyetographs = {1:'q1',2: 'q2',3: 'q3',4: 'q4'}
+    prep_curves = pd.DataFrame(columns = hydro_events)
+    for event in hydro_events:
+        dist_df, weight_df = get_hyeto_input_data_atlas(atlas14_precip_table_dir, Atlas14_hyetographs[quartile], display_print)
+        dist_df['precip_cumu'] = dist_df[Atlas14_hyetographs[quartile]]*precip_data['Median'].loc[event]
+        s = S_24hr(CN)
+        ia = IA_24hr(s)
+        dist_df = excess_precip(dist_df,ia, s)
+        prep_curves[event] = dist_df['hyeto_input']
+        t_step = dist_df.index[1]
+    return prep_curves, t_step
+
+def excess_precip(dist_df: pd.DataFrame,ia: float, s: float) -> pd.DataFrame:
+    '''Calculates runoff using the curve number approach for a dataframe. See equation 10-9
+       of NEH 630, Chapter 10
+       (https://www.wcc.nrcs.usda.gov/ftpref/wntsc/H&H/NEHhydrology/ch10.pdf) 
+    '''
+    dist_df['excess_precip'] = np.where(dist_df['precip_cumu']<= ia, 0, (np.square(dist_df['precip_cumu']-ia))/(dist_df['precip_cumu']-ia+s))
+    dist_df['hyeto_input'] = dist_df['excess_precip'].diff()
+    dist_df['hyeto_input'] = dist_df['hyeto_input'].fillna(0.0)
+    return dist_df
+
+def S_24hr(CN: int) -> float:
+    '''Calculates the potential maximum retention after runoff begins (S), in 
+       inches.
+    '''
+    return (1000-10*CN)/CN
+
+
+def IA_24hr(s24: float) -> float:
+    '''Calculats the inital abstraction (Ia) as a function of the maximum
+       potentail rention (S). Lim et al. (2006) suggest that a 5% ratio of 
+       Ia to S is more appropriate for urbanized areas instead of the more 
+       commonly used 20% ratio 
+       (https://onlinelibrary.wiley.com/doi/abs/10.1111/j.1752-1688.2006.tb04481.x).
+    '''
+    return 0.2*s24
+
+def get_hyeto_input_data_nrcs(temporal_precip_table_dir: str, event: int,
+                         display_print: bool=True) -> pd.DataFrame:
+    '''Extracts the temporal distribution from precipitation frequency data for the specified duration from an Excel 
+       sheet and returns the data as a dataframe. 
+    '''
+    hyeto_precip = 'nrcs_hye_{}'.format(event)
+    df = pd.read_excel(temporal_precip_table_dir, sheet_name=hyeto_precip, index_col=0)
+    if display_print: 
+        print(display(df.head(2)))
+    return df
+
+def get_hyeto_input_data_atlas(temporal_precip_table_dir: str, quartile: str,
+                         display_print: bool=True) -> tuple:
+    '''Extracts the temporal distribution from precipitation frequency data for the specified duration from an Excel 
+       sheet and returns the data as a dataframe. 
+    '''
+    hyeto_precip = 'atlas_hye_{}'.format(quartile)
+    df = pd.read_excel(temporal_precip_table_dir, sheet_name=hyeto_precip, index_col=0)
+    weights_df = pd.read_excel(temporal_precip_table_dir, sheet_name='atlas_hye_weights', index_col=0)
+    if display_print: 
+        print(display(df.head(2)))
+    return df, weights_df
+
+def extend_time(prep_curves: pd.DataFrame,time_extend: float,time_step: float) -> pd.DataFrame:
+    """extends the hyetograph by a select period of time. the timestep is the spacing between
+       simulation intervals (typically 0.1 or 0.5 hours)
+    """
+    extend_curves = prep_curves.loc[0.0:time_extend]*0
+    extend_curves.index = extend_curves.index+(24+time_step)
+    return pd.concat([prep_curves,extend_curves]).rename_axis('hours')
+
+def weights_noaa(Reccurence_Intervals):
+    #Code for making list of years into a list of weights
+    weights=[]
+    adj_weights = {}
+    uni = sorted(list(set(Reccurence_Intervals)))
+    for i, year in reversed(list(enumerate(uni))):
+        w=round(1/year-sum(weights),9) 
+        weights.append(w)
+    weights.reverse()
+    return weights
+
+def precip_distributed_atlas(hydro_events:np.ndarray,atlas14_precip_table_dir: pl.WindowsPath,
+                     precip_data: pd.DataFrame, quartile:int, display_print = False):
+    """Takes the events, precipitation data, nrcs temporal distribution, CN and applies the CN reduction method to
+    obtain a runoff curve for each recurrence interval
+    """
+    #runoff_distros1 = {}
+    Atlas14_hyetographs = {1:'q1',2: 'q2',3: 'q3',4: 'q4'}
+    prep_curves = pd.DataFrame(columns = hydro_events)
+    for event in hydro_events:
+        dist_df, weight_df = get_hyeto_input_data_atlas(atlas14_precip_table_dir, Atlas14_hyetographs[quartile], display_print)
+        dist_df['precip'] = dist_df[Atlas14_hyetographs[quartile]]*precip_data['Median'].loc[event]
+        dist_df['hyeto_input'] = dist_df['precip'].diff()
+        dist_df['hyeto_input'] = dist_df['precip'].fillna(0.0)
+        prep_curves[event] = dist_df['hyeto_input']
+        t_step = dist_df.index[1]
+    return prep_curves, t_step
+
+def combine_results_stratified(var: str, outputs_dir: str, BCN: str, duration: int, hydrology_IDs: list,
+         run_dur_dic: dict=None, remove_ind_dur: bool = True) -> dict:
+    '''Combines the excess rainfall *.csv files for each duration into a 
+       single dictionary for all durations. A small value of 0.0001 is added so the result is not printed in scientific notation.
+    '''
+    pd.reset_option('^display.', silent=True)
+    assert var in ['Excess_Rainfall', 'Rainfall','Weights'], 'Cannot combine results'
+    dic = {}
+    df_lst = []
+    for ID in hydrology_IDs:
+        scen = '{0}_Dur{1}_{2}'.format(BCN, duration, ID)
+        file = outputs_dir/'{}_{}.csv'.format(var, scen)
+        df = pd.read_csv(file, index_col = 0)
+        if var == 'Excess_Rainfall' or var == 'Rainfall':
+            df_dic = df.to_dict()
+            dates = list(df.index)
+            ordin = df.index.name.title()
+            events = {}
+            for k, v in df_dic.items():
+                if 'E' in k or 'N' in k:
+                    m = list(v.values())
+                    m1= [ float(i)+0.0001 if float(i)< 0.0001  and 0< float(i) else float(i)  for i in m]
+                    events[k] = m1
+            key ='{0}'.format(str(ID).zfill(2))
+            val = {'time_idx_ordinate': ordin, 
+                   'run_duration_days': run_dur_dic[str(duration)],
+                    'time_idx': dates, 
+                    'pluvial_BC_units': 'inch/ts', 
+                    'BCName': {BCN: events}}         
+            dic[key] = val
+
+        elif var == 'Weights':
+            df_lst.append(df)
+        if remove_ind_dur:
+            os.remove(file)    
+    if var == 'Weights':
+        all_dfs = pd.concat(df_lst)
+        weights_dic = all_dfs.to_dict()
+        dic = {'BCName': {BCN: weights_dic['Weight']}}
+        #print('Total Weight:', all_dfs['Weight'].sum())
+    return dic
+
+def combine_results_traditional(var: str, outputs_dir: str, BCN: str, duration: int, hydrology_IDs: list,
+         run_dur_dic: dict=None, remove_ind_dur: bool = True) -> dict:
+    '''Combines the excess rainfall *.csv files for each duration into a 
+       single dictionary for all durations. A small value of 0.0001 is added so the result is not printed in scientific notation.
+    '''
+    pd.reset_option('^display.', silent=True)
+    assert var in ['Excess_Rainfall', 'Weights'], 'Cannot combine results'
+    dic = {}
+    df_lst = []
+    for ID in hydrology_IDs:
+        scen = '{0}_Dur{1}_{2}'.format(BCN, duration, ID)
+        file = outputs_dir/'{}_{}.csv'.format(var, scen)
+        df = pd.read_csv(file, index_col = 0)
+        if var == 'Excess_Rainfall':
+            df_dic = df.to_dict()
+            dates = list(df.index)
+            ordin = df.index.name.title()
+            events = {}
+            for k, v in df_dic.items():
+                m = list(v.values())
+                m1= [ float(i)+0.0001 if float(i)< 0.0001  and 0< float(i) else float(i)  for i in m]
+                events[k] = m1
+            key ='{0}'.format(str(ID).zfill(2))
+            val = {'time_idx_ordinate': ordin, 
+                   'run_duration_days': run_dur_dic[str(duration)],
+                    'time_idx': dates, 
+                    'pluvial_BC_units': 'inch/ts', 
+                    'BCName': {BCN: events}}         
+            dic[key] = val
+        elif var == 'Weights':
+            df_lst.append(df)
+        if remove_ind_dur:
+            os.remove(file)    
+    if var == 'Weights':
+        all_dfs = pd.concat(df_lst)
+        weights_dic = all_dfs.to_dict()
+        dic = {'BCName': {BCN: weights_dic['Weight']}}
+        #print('Total Weight:', all_dfs['Weight'].sum())
+    return dic
