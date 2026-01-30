@@ -19,6 +19,7 @@ from shapely.geometry import mapping
 import rasterio
 from rasterio.mask import mask
 from .hydromet_JSON_to_DSS import *
+from sklearn.linear_model import LinearRegression
 
 geoDF = 'GeoDataFrame'
 plib = 'pathlib.Path'
@@ -627,8 +628,7 @@ def plot_decile_histogram(df: pd.DataFrame) -> plt.subplots:
     '''
     fig = df.hist(bins=20, figsize=(20,6), grid=False)
 
-##need to smooth this per NEH 
-def create_inflection_points_nrcs(dur_precip_df_noaa):
+def create_inflection_points_nrcs(dur_precip_df_noaa,smooth=True):
     '''
     Docstring for create_inflection_points_nrcs
     
@@ -642,22 +642,70 @@ def create_inflection_points_nrcs(dur_precip_df_noaa):
     #get incremental intensity in/h
     dur_precip_df_noaa['incre_int'] = dur_precip_df_noaa.apply(lambda x: x.value / (x.duration_minutes/60),axis=1)
 
-    #need to add regression here to smooth the 
-    #initial_df = dur_precip_df_noaa.copy()[['duration_minutes','incre_int']].set_index('duration_minutes')
-    revised_df = dur_precip_df_noaa #smoothed
+    if smooth:
+        #smoothing algorithm
+        y_fit = neh_smoothing(dur_precip_df_noaa)
+        dur_precip_df_noaa['incre_int_smooth'] = y_fit
+
+        #replace precip and ratio values
+
+        dur_precip_df_noaa['precip_smooth'] = dur_precip_df_noaa['incre_int_smooth']*(dur_precip_df_noaa['duration_minutes']/60)
+        dur_precip_df_noaa['ratio'] = dur_precip_df_noaa['precip_smooth']/dur_precip_df_noaa.loc['24h','precip_smooth']
+
 
     #set points along curve from the NEH Handbook. (u)se strings to avoid float issues)
     cumulative_ratio = {}
     cumulative_ratio['0'] = 0
-    cumulative_ratio['6'] = 0.5 - (revised_df.loc['12h'].ratio/2)
-    cumulative_ratio['9'] = 0.5 - (revised_df.loc['06h'].ratio/2)
-    cumulative_ratio['10.5'] = 0.5 - (revised_df.loc['03h'].ratio/2)
-    cumulative_ratio['11'] = 0.5 - (revised_df.loc['02h'].ratio/2)
-    cumulative_ratio['11.5'] = 0.5 - (revised_df.loc['60m'].ratio/2)
-    cumulative_ratio['11.75'] = 0.5 - (revised_df.loc['30m'].ratio/2)
-    cumulative_ratio['11.875'] = 0.5 - (revised_df.loc['15m'].ratio/2)
-    cumulative_ratio['11.9167'] = 0.5 - (revised_df.loc['10m'].ratio/2)
+    cumulative_ratio['6'] = 0.5 - (dur_precip_df_noaa.loc['12h'].ratio/2)
+    cumulative_ratio['9'] = 0.5 - (dur_precip_df_noaa.loc['06h'].ratio/2)
+    cumulative_ratio['10.5'] = 0.5 - (dur_precip_df_noaa.loc['03h'].ratio/2)
+    cumulative_ratio['11'] = 0.5 - (dur_precip_df_noaa.loc['02h'].ratio/2)
+    cumulative_ratio['11.5'] = 0.5 - (dur_precip_df_noaa.loc['60m'].ratio/2)
+    cumulative_ratio['11.75'] = 0.5 - (dur_precip_df_noaa.loc['30m'].ratio/2)
+    cumulative_ratio['11.875'] = 0.5 - (dur_precip_df_noaa.loc['15m'].ratio/2)
+    cumulative_ratio['11.9167'] = 0.5 - (dur_precip_df_noaa.loc['10m'].ratio/2)
     return cumulative_ratio
+
+def neh_smoothing(dur_precip_df_noaa):
+    '''
+    Docstring for neh_smoothing
+    
+    :param dur_precip_df_noaa: Description
+    '''
+    hold_point = 60 #min per NEH
+    x = np.array(dur_precip_df_noaa.duration_minutes).reshape(-1, 1)
+    y = np.array(dur_precip_df_noaa.incre_int)
+
+    x_log = np.log10(x)
+    y_log = np.log10(y)
+
+    x0 = np.log10(hold_point)
+    y0 = np.log10(dur_precip_df_noaa.loc[dur_precip_df_noaa['duration_minutes'] == hold_point,'incre_int'].item())
+    x_trans = x_log - x0
+    y_trans = y_log - y0
+
+    # Initialize the model with fit_intercept=False
+    model1 = LinearRegression(fit_intercept=False)
+    model2 = LinearRegression(fit_intercept=False)
+
+    # Fit the translated data for 5min through 60min
+    model1.fit(x_trans[:5], y_trans[:5])
+    model2.fit(x_trans[4:], y_trans[4:])
+
+    # prediction for a range of values
+    y_fit_translated1 = model1.predict(x_trans[:5])
+    x_fit1 = np.power(10,x_trans[:5]+ x0)
+    y_fit1 = np.power(10,y_fit_translated1 + y0)
+
+    # prediction for a range of values
+    y_fit_translated2 = model.predict(x_trans[4:])
+    x_fit2 = np.power(10,x_trans[4:]+ x0)
+    y_fit2 = np.power(10,y_fit_translated2 + y0)
+
+    # merge
+    x_fit = np.append(x_fit1[:-1],x_fit2)
+    y_fit = np.append(y_fit1[:-1],y_fit2)
+    return y_fit
 
 def get_input_data(precip_table_dir: str, duration: int, lower_limit: int=2,
                                  display_print: bool=True) -> pd.DataFrame:
