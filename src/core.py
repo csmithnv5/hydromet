@@ -698,7 +698,7 @@ def neh_smoothing(dur_precip_df_noaa):
     y_fit1 = np.power(10,y_fit_translated1 + y0)
 
     # prediction for a range of values
-    y_fit_translated2 = model.predict(x_trans[4:])
+    y_fit_translated2 = model2.predict(x_trans[4:])
     x_fit2 = np.power(10,x_trans[4:]+ x0)
     y_fit2 = np.power(10,y_fit_translated2 + y0)
 
