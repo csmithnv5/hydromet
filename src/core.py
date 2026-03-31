@@ -860,7 +860,7 @@ def combine_results_stratified(var: str, outputs_dir: str, BCN: str, duration: i
     '''Combines the excess rainfall *.csv files for each duration into a 
        single dictionary for all durations. A small value of 0.0001 is added so the result is not printed in scientific notation.
     '''
-    pd.reset_option('^display.', silent=True)
+    pd.reset_option('^display.')
     assert var in ['Excess_Rainfall', 'Rainfall','Weights'], 'Cannot combine results'
     dic = {}
     df_lst = []
@@ -902,7 +902,7 @@ def combine_results_traditional(var: str, outputs_dir: str, BCN: str, duration: 
     '''Combines the excess rainfall *.csv files for each duration into a 
        single dictionary for all durations. A small value of 0.0001 is added so the result is not printed in scientific notation.
     '''
-    pd.reset_option('^display.', silent=True)
+    pd.reset_option('^display.')
     assert var in ['Excess_Rainfall', 'Weights'], 'Cannot combine results'
     dic = {}
     df_lst = []
